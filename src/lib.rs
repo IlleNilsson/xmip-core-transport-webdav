@@ -37,10 +37,15 @@ pub use client::Client;
 use http::target::HttpTarget;
 pub use session::{Event, Session, Store};
 use transport::error::{Result, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Artefact, Claimed, Directions, ResourceClaim, Transport};
 pub use xml::Member;
 
+/// The one member the loopback pair puts into the root collection.
+const LOOPBACK_MEMBER: &str = "probe.bin";
+
+#[derive(Clone)]
 pub struct WebDavTransport {
     collection: String,
     timeout: Option<Duration>,
@@ -209,6 +214,57 @@ impl ResourceClaim for WebDavTransport {
     }
 }
 
+impl WebDavTransport {
+    /// Both ends on this machine: an ephemeral local port serving the root
+    /// collection, the loopback timeout.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("webdav://127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A bound listener waiting for its one client. `WebDAV` keeps its
+/// connection, so the session reads it until the PUT.
+struct Listening {
+    transport: WebDavTransport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        let mut session = self.transport.accept_one(&self.listener)?;
+        session
+            .next_put()?
+            .ok_or_else(|| protocol_error("the client closed without storing"))
+    }
+}
+
+impl Loopback for WebDavTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.clone(),
+            listener,
+            address,
+        }))
+    }
+
+    /// PUT the payload as one member of the root collection, from a fresh
+    /// near end on one connection to `address`.
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        let near = Self {
+            collection: format!("http://{address}"),
+            ..self.clone()
+        };
+        near.send(LOOPBACK_MEMBER, payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +416,39 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert!(members[0].collection);
         assert_eq!(members[1].href, "/new/a.txt");
+    }
+
+    #[test]
+    fn the_loopback_puts_one_member_through_its_own_session() {
+        let pair = WebDavTransport::loopback();
+        let arrived = pair.round(b"a member").expect("round");
+        assert_eq!(arrived.bytes, b"a member");
+        assert!(arrived.origin_uri.starts_with("webdav://127.0.0.1:"));
+        assert!(arrived.origin_uri.ends_with("/probe.bin"));
+        assert_eq!(pair.name(), "webdav");
+        assert_eq!(pair.ceiling(), None);
+    }
+
+    /// The Playground's edge payloads, written here so the crate does not
+    /// depend on it.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole() {
+        let pair = WebDavTransport::loopback();
+        for (name, payload) in edge_payloads() {
+            assert!(pair.refuses(&payload).is_none(), "{name}");
+            let arrived = pair.round(&payload).expect(name);
+            assert_eq!(arrived.bytes, payload, "{name}");
+        }
     }
 }

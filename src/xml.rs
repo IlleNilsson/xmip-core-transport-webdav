@@ -2,9 +2,13 @@
 //! members a multistatus lists, and the token a LOCK grants.
 //!
 //! Not an XML parser. Elements are found by local name whatever prefix the
-//! server chose — `D:`, `d:`, none — and entities are the five XML has.
-//! A server that nests a `response` inside a `response` is handled; one
-//! that puts markup in a CDATA section is not, and no `WebDAV` server does.
+//! server chose — `D:`, `d:`, none — and entities are the five the
+//! capability's flat scan already knows (ADR-0044; this crate re-declared
+//! them until 2026-09-14). A server that nests a `response` inside a
+//! `response` is handled; one that puts markup in a CDATA section is not,
+//! and no `WebDAV` server does.
+
+use transport::xml::unescape;
 
 /// What PROPFIND said about one member: its href, whether it is a
 /// collection, and whether an active lock was reported on it.
@@ -106,25 +110,6 @@ fn has(xml: &str, name: &str) -> bool {
     false
 }
 
-/// `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&apos;` back to their characters.
-#[must_use]
-pub fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-}
-
-/// The characters XML text cannot carry bare, escaped.
-#[must_use]
-pub fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +141,5 @@ mod tests {
             super::members("<D:multistatus><D:response>").is_empty(),
             "unclosed"
         );
-        assert_eq!(escape("a<b&\"c\""), "a&lt;b&amp;&quot;c&quot;");
     }
 }

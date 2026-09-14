@@ -16,7 +16,7 @@ use transport::error::Result;
 use transport::socket;
 
 use crate::wire::{self, Request, Response};
-use crate::xml::escape;
+use transport::xml::escape;
 
 /// What the session serves: collections of files, and the locks on them.
 ///

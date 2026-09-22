@@ -96,7 +96,7 @@ impl Client {
         }
         response.judge()?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
-        Ok(xml::members(&text).into_iter().next().map(relative))
+        Ok(xml::members(&text)?.into_iter().next().map(relative))
     }
 
     fn propfind(&mut self, href: &str, depth: &str) -> Result<Vec<Member>> {
@@ -106,7 +106,7 @@ impl Client {
             .with_body(PROPFIND);
         let response = self.expect_ok(&request)?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
-        Ok(xml::members(&text).into_iter().map(relative).collect())
+        Ok(xml::members(&text)?.into_iter().map(relative).collect())
     }
 
     /// The bytes at `href`.
@@ -167,7 +167,7 @@ impl Client {
             .with_body(LOCK);
         let response = self.expect_ok(&request)?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
-        xml::lock_token(&text)
+        xml::lock_token(&text)?
             .or_else(|| {
                 response
                     .header("lock-token")

@@ -2,13 +2,13 @@
 //! members a multistatus lists, and the token a LOCK grants.
 //!
 //! Not an XML parser. Elements are found by local name whatever prefix the
-//! server chose — `D:`, `d:`, none — and entities are the five the
-//! capability's flat scan already knows (ADR-0044; this crate re-declared
-//! them until 2026-09-14). A server that nests a `response` inside a
+//! server chose — `D:`, `d:`, none — and entities are read as every XML
+//! reader in the estate reads them, by `xmip-core-codec`. A server that nests a `response` inside a
 //! `response` is handled; one that puts markup in a CDATA section is not,
 //! and no `WebDAV` server does.
 
-use transport::xml::unescape;
+use codec::xml::unescape;
+use transport::error::Result;
 
 /// What PROPFIND said about one member: its href, whether it is a
 /// collection, and whether an active lock was reported on it.
@@ -20,29 +20,39 @@ pub struct Member {
 }
 
 /// The members of a multistatus body, one per `<D:response>`.
-#[must_use]
-pub fn members(xml: &str) -> Vec<Member> {
+///
+/// # Errors
+///
+/// An href holds an entity XML does not define.
+pub fn members(xml: &str) -> Result<Vec<Member>> {
     let mut members = Vec::new();
     let mut from = 0;
     while let Some((content, after)) = element(xml, from, "response") {
         if let Some((href, _)) = element(content, 0, "href") {
             members.push(Member {
-                href: unescape(href.trim()),
+                href: unescape(href.trim())?,
                 collection: has(content, "collection"),
                 locked: has(content, "activelock"),
             });
         }
         from = after;
     }
-    members
+    Ok(members)
 }
 
 /// The lock token a LOCK response carries: `<D:locktoken><D:href>`.
-#[must_use]
-pub fn lock_token(xml: &str) -> Option<String> {
-    let (content, _) = element(xml, 0, "locktoken")?;
-    let (href, _) = element(content, 0, "href")?;
-    Some(unescape(href.trim()))
+///
+/// # Errors
+///
+/// The token holds an entity XML does not define.
+pub fn lock_token(xml: &str) -> Result<Option<String>> {
+    let Some((content, _)) = element(xml, 0, "locktoken") else {
+        return Ok(None);
+    };
+    let Some((href, _)) = element(content, 0, "href") else {
+        return Ok(None);
+    };
+    Ok(Some(unescape(href.trim())?))
 }
 
 /// One tag as it opens or closes: its local name, whether it closes, and
@@ -124,7 +134,7 @@ mod tests {
               </d:prop></d:propstat></d:response>
             <response><href>/orders/2.edi</href><propstat><prop><resourcetype/>
               </prop></propstat></response></D:multistatus>"#;
-        let members = super::members(xml);
+        let members = super::members(xml).expect("read");
         assert_eq!(members.len(), 3);
         assert!(members[0].collection);
         assert_eq!(members[1].href, "/orders/a&b.edi");
@@ -135,10 +145,15 @@ mod tests {
         let lock = r#"<D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock>
             <D:locktoken><D:href>opaquelocktoken:7</D:href></D:locktoken>
             </D:activelock></D:lockdiscovery></D:prop>"#;
-        assert_eq!(lock_token(lock).as_deref(), Some("opaquelocktoken:7"));
-        assert!(lock_token("<D:prop/>").is_none());
+        assert_eq!(
+            lock_token(lock).expect("read").as_deref(),
+            Some("opaquelocktoken:7")
+        );
+        assert!(lock_token("<D:prop/>").expect("read").is_none());
         assert!(
-            super::members("<D:multistatus><D:response>").is_empty(),
+            super::members("<D:multistatus><D:response>")
+                .expect("read")
+                .is_empty(),
             "unclosed"
         );
     }

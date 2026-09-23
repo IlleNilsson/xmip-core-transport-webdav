@@ -17,9 +17,9 @@
 //! the claim token, and its receive locks each member before it takes it,
 //! passing over what another node already holds.
 //!
-//! Plain HTTP/1.1 with Content-Length; TLS is the transport capability's,
-//! per ADR-0033. Where the http technology already reads a target, this
-//! crate uses it.
+//! HTTP/1.1 with Content-Length, guarded where the scheme says so — TLS is
+//! `xmip-core-tls`'s, per ADR-0033, reached through the http technology's
+//! endpoint, which also reads the target.
 //!
 //! A send target is `webdav://host:port/path/name` or `http://…`, or a
 //! name alone inside this transport's collection. The origin URI is the

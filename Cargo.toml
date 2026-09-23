@@ -33,3 +33,7 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 unwrap_used = "warn"
 expect_used = "allow"
+
+[features]
+# HTTPS, through http's: `webdavs://` and `https://` need it.
+tls = ["http/tls"]

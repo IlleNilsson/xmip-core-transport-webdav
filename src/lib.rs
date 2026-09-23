@@ -18,7 +18,7 @@
 //! passing over what another node already holds.
 //!
 //! HTTP/1.1 with Content-Length, guarded where the scheme says so — TLS is
-//! `xmip-core-tls`'s, per ADR-0033, reached through the http technology's
+//! `xmip-core-library-tls`'s, per ADR-0033, reached through the http technology's
 //! endpoint, which also reads the target.
 //!
 //! A send target is `webdav://host:port/path/name` or `http://…`, or a

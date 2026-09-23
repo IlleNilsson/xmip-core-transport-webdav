@@ -3,7 +3,7 @@
 //!
 //! Not an XML parser. Elements are found by local name whatever prefix the
 //! server chose — `D:`, `d:`, none — and entities are read as every XML
-//! reader in the estate reads them, by `xmip-core-codec`. A server that nests a `response` inside a
+//! reader in the estate reads them, by `xmip-core-library-codec`. A server that nests a `response` inside a
 //! `response` is handled; one that puts markup in a CDATA section is not,
 //! and no `WebDAV` server does.
 

@@ -1,13 +1,12 @@
 //! The client's side: one connection to a `WebDAV` server, one method at a
 //! time, each a request answered before the next is written.
 
-use std::io::BufReader;
-use std::net::TcpStream;
+use std::io::{BufReader, Write};
 use std::time::Duration;
 
+use http::endpoint::{self, Connection};
 use http::target::HttpTarget;
-use transport::error::{Result, protocol_error};
-use transport::socket;
+use transport::error::{Result, classify, protocol_error};
 
 use crate::wire::{self, Request, Response};
 use crate::xml::{self, Member};
@@ -23,28 +22,29 @@ const LOCK: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
 
 /// One connected client.
 pub struct Client {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    // One connection, read through a buffer and written through the same
+    // object: a guarded connection cannot be split into two halves the way a
+    // socket can.
+    stream: BufReader<Box<dyn Connection>>,
     authority: String,
 }
 
 impl Client {
     /// Connect to the server `target` names.
     ///
+    /// `webdavs://` and `https://` are guarded, through the same endpoint
+    /// every technology riding on HTTP connects by, and so by the estate's
+    /// one TLS (ADR-0033). Until 2026-09-23 this refused them.
+    ///
     /// # Errors
-    /// Where the server could not be reached, or the target asks for
-    /// https, which this transport does not yet speak (ADR-0033).
+    /// Where the server could not be reached, or the target asks for TLS
+    /// this build has no `tls` feature for.
     pub fn connect(target: &HttpTarget<'_>, timeout: Option<Duration>) -> Result<Self> {
-        if target.secure {
-            return Err(protocol_error(
-                "https was asked for and this transport speaks plain http",
-            ));
-        }
-        let stream = socket::connect_tcp(&target.address(), timeout)?;
-        let (reader, writer) = socket::split(stream)?;
+        let scheme = if target.secure { "https" } else { "http" };
+        let endpoint = format!("{scheme}://{}{}", target.authority, target.path);
+
         Ok(Self {
-            reader,
-            writer,
+            stream: BufReader::new(endpoint::connect(&endpoint, timeout)?),
             authority: target.authority.to_string(),
         })
     }
@@ -60,8 +60,12 @@ impl Client {
     /// # Errors
     /// Where the connection broke or the answer was not HTTP.
     pub fn exchange(&mut self, request: &Request) -> Result<Response> {
-        wire::write_request(&mut self.writer, &self.authority, request)?;
-        wire::read_response(&mut self.reader)
+        wire::write_request(self.stream.get_mut(), &self.authority, request)?;
+        self.stream
+            .get_mut()
+            .flush()
+            .map_err(|failure| classify("flushing the request", &failure))?;
+        wire::read_response(&mut self.stream)
     }
 
     /// One request that must succeed.
@@ -220,10 +224,16 @@ mod tests {
     }
 
     #[test]
-    fn https_is_refused_rather_than_sent_in_the_clear() {
+    fn a_guarded_target_is_carried_to_the_endpoint_rather_than_refused() {
+        // Nothing listens on port 1, so the connection fails where a TLS
+        // build reaches: at the socket, not at a refusal of its own.
         let target = HttpTarget::parse("https://127.0.0.1:1/x").expect("parsed");
-        let error = Client::connect(&target, None).err().expect("refused");
-        assert!(!error.retryable);
-        assert!(error.message.contains("https"));
+        let error = Client::connect(&target, None).err().expect("nothing there");
+
+        assert!(
+            !error.message.contains("speaks plain http"),
+            "{}",
+            error.message
+        );
     }
 }

@@ -15,8 +15,8 @@ use transport::Arrived;
 use transport::error::Result;
 use transport::socket;
 
-use crate::wire::{self, Request, Response};
 use codec::xml::escape;
+use http::message::{self, Request, Response};
 
 /// What the session serves: collections of files, and the locks on them.
 ///
@@ -144,11 +144,12 @@ impl Session {
     /// Where the connection broke, nothing arrived before the timeout, or
     /// what arrived was not HTTP.
     pub fn next_event(&mut self) -> Result<Option<Event>> {
-        let Some(request) = wire::read_request(&mut self.reader)? else {
+        let Some(request) = message::read_request(&mut self.reader)? else {
             return Ok(None);
         };
         let (event, response) = self.answer(&request);
-        wire::write_response(&mut self.writer, &response)?;
+        let response = response.header("Connection", "keep-alive");
+        message::write_response(&mut self.writer, &response)?;
         Ok(Some(event))
     }
 
@@ -158,12 +159,9 @@ impl Session {
         let (collection, name) = (collection.to_string(), name.to_string());
         let refused = |status: u16| (Event::Refused(href.clone(), status), Response::new(status));
         match request.method.as_str() {
-            "PROPFIND" => self.propfind(&href, request.header("Depth").unwrap_or("1")),
+            "PROPFIND" => self.propfind(&href, request.header_value("Depth").unwrap_or("1")),
             "GET" => match self.file(&collection, &name) {
-                Some(bytes) => (
-                    Event::Got(href.clone()),
-                    Response::new(200).with_body(&bytes),
-                ),
+                Some(bytes) => (Event::Got(href.clone()), Response::new(200).body(&bytes)),
                 None => refused(404),
             },
             "PUT" => {
@@ -205,7 +203,7 @@ impl Session {
             "LOCK" => self.lock(&href, &collection, &name),
             "UNLOCK" => {
                 let presented = request
-                    .header("Lock-Token")
+                    .header_value("Lock-Token")
                     .map(|value| value.trim_matches(['<', '>']))
                     .unwrap_or_default();
                 match self.store.locks.get(&href) {
@@ -229,7 +227,7 @@ impl Session {
     fn may_write(&self, href: &str, request: &Request) -> bool {
         self.store.locks.get(href).is_none_or(|token| {
             request
-                .header("If")
+                .header_value("If")
                 .is_some_and(|value| value.contains(&format!("<{token}>")))
         })
     }
@@ -258,8 +256,8 @@ impl Session {
         (
             Event::Listed(href.to_string()),
             Response::new(207)
-                .with_header("Content-Type", "application/xml; charset=utf-8")
-                .with_body(body.as_bytes()),
+                .header("Content-Type", "application/xml; charset=utf-8")
+                .body(body.as_bytes()),
         )
     }
 
@@ -300,9 +298,9 @@ impl Session {
         (
             Event::Locked(href.to_string(), token.clone()),
             Response::new(200)
-                .with_header("Lock-Token", &format!("<{token}>"))
-                .with_header("Content-Type", "application/xml; charset=utf-8")
-                .with_body(body.as_bytes()),
+                .header("Lock-Token", &format!("<{token}>"))
+                .header("Content-Type", "application/xml; charset=utf-8")
+                .body(body.as_bytes()),
         )
     }
 }

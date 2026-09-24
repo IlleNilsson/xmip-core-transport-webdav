@@ -1,15 +1,23 @@
 //! The client's side: one connection to a `WebDAV` server, one method at a
-//! time, each a request answered before the next is written.
+//! time, each a request answered before the next is written. The requests
+//! and answers are HTTP's, written and read by the http technology's codec
+//! (`http::message`), the connection kept alive between them.
 
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::time::Duration;
 
 use http::endpoint::{self, Connection};
+use http::message::{self, Request, Response};
 use http::target::HttpTarget;
-use transport::error::{Result, classify, protocol_error};
+use transport::error::{Result, protocol_error};
 
-use crate::wire::{self, Request, Response};
 use crate::xml::{self, Member};
+
+/// Who answers, as a refusal names it.
+const SERVICE: &str = "the WebDAV server";
+/// The one status beyond HTTP's own that is worth repeating: somebody holds
+/// the resource now and will let go.
+const LOCKED: &str = "Locked";
 
 /// The body PROPFIND asks with: what a member is, and who holds it.
 const PROPFIND: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
@@ -60,19 +68,17 @@ impl Client {
     /// # Errors
     /// Where the connection broke or the answer was not HTTP.
     pub fn exchange(&mut self, request: &Request) -> Result<Response> {
-        wire::write_request(self.stream.get_mut(), &self.authority, request)?;
-        self.stream
-            .get_mut()
-            .flush()
-            .map_err(|failure| classify("flushing the request", &failure))?;
-        wire::read_response(&mut self.stream)
+        let request = request
+            .clone()
+            .header("Host", &self.authority)
+            .header("Connection", "keep-alive");
+        message::write_request(self.stream.get_mut(), &request)?;
+        message::read_response(&mut self.stream)
     }
 
     /// One request that must succeed.
     fn expect_ok(&mut self, request: &Request) -> Result<Response> {
-        let response = self.exchange(request)?;
-        response.judge()?;
-        Ok(response)
+        judged(self.exchange(request)?)
     }
 
     /// The members of `collection`, PROPFIND Depth 1: the collection
@@ -91,23 +97,23 @@ impl Client {
     /// Where the server refused for any reason other than 404.
     pub fn find(&mut self, href: &str) -> Result<Option<Member>> {
         let request = Request::new("PROPFIND", href)
-            .with_header("Depth", "0")
-            .with_header("Content-Type", "application/xml")
-            .with_body(PROPFIND);
+            .header("Depth", "0")
+            .header("Content-Type", "application/xml")
+            .body(PROPFIND);
         let response = self.exchange(&request)?;
         if response.status == 404 {
             return Ok(None);
         }
-        response.judge()?;
+        let response = judged(response)?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
         Ok(xml::members(&text)?.into_iter().next().map(relative))
     }
 
     fn propfind(&mut self, href: &str, depth: &str) -> Result<Vec<Member>> {
         let request = Request::new("PROPFIND", href)
-            .with_header("Depth", depth)
-            .with_header("Content-Type", "application/xml")
-            .with_body(PROPFIND);
+            .header("Depth", depth)
+            .header("Content-Type", "application/xml")
+            .body(PROPFIND);
         let response = self.expect_ok(&request)?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
         Ok(xml::members(&text)?.into_iter().map(relative).collect())
@@ -128,8 +134,8 @@ impl Client {
     /// the server refused.
     pub fn put(&mut self, href: &str, bytes: &[u8]) -> Result<()> {
         let request = Request::new("PUT", href)
-            .with_header("Content-Type", "application/octet-stream")
-            .with_body(bytes);
+            .header("Content-Type", "application/octet-stream")
+            .body(bytes);
         self.expect_ok(&request).map(|_| ())
     }
 
@@ -147,7 +153,7 @@ impl Client {
     /// # Errors
     /// As [`Self::delete`].
     pub fn delete_held(&mut self, href: &str, token: &str) -> Result<()> {
-        let request = Request::new("DELETE", href).with_header("If", &format!("(<{token}>)"));
+        let request = Request::new("DELETE", href).header("If", &format!("(<{token}>)"));
         self.expect_ok(&request).map(|_| ())
     }
 
@@ -166,15 +172,15 @@ impl Client {
     /// refused, or answered without a token.
     pub fn lock(&mut self, href: &str) -> Result<String> {
         let request = Request::new("LOCK", href)
-            .with_header("Timeout", "Second-600")
-            .with_header("Content-Type", "application/xml")
-            .with_body(LOCK);
+            .header("Timeout", "Second-600")
+            .header("Content-Type", "application/xml")
+            .body(LOCK);
         let response = self.expect_ok(&request)?;
         let text = String::from_utf8_lossy(&response.body).into_owned();
         xml::lock_token(&text)?
             .or_else(|| {
                 response
-                    .header("lock-token")
+                    .header_value("lock-token")
                     .map(|value| value.trim_matches(['<', '>']).to_string())
             })
             .ok_or_else(|| protocol_error("a LOCK answered without a lock token"))
@@ -186,9 +192,20 @@ impl Client {
     /// Where the server refused: the token is not the lock's, or there is
     /// no lock.
     pub fn unlock(&mut self, href: &str, token: &str) -> Result<()> {
-        let request = Request::new("UNLOCK", href).with_header("Lock-Token", &format!("<{token}>"));
+        let request = Request::new("UNLOCK", href).header("Lock-Token", &format!("<{token}>"));
         self.expect_ok(&request).map(|_| ())
     }
+}
+
+/// `Ok` for a 2xx, else the failure with HTTP's judgement of it — and 423
+/// Locked worth repeating too, which HTTP alone does not say.
+fn judged(response: Response) -> Result<Response> {
+    message::judge(
+        SERVICE,
+        response,
+        |answer| message::reason(answer.status).to_string(),
+        |code| code == LOCKED,
+    )
 }
 
 /// A member's href as a path, where the server wrote it as a full URL.
@@ -206,6 +223,16 @@ fn relative(mut member: Member) -> Member {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_is_worth_waiting_for_and_a_missing_member_is_not() {
+        assert!(judged(Response::new(207)).is_ok());
+        let locked = judged(Response::new(423)).expect_err("locked");
+        assert!(locked.retryable);
+        assert_eq!(locked.message, "the WebDAV server answered 423 Locked");
+        assert!(judged(Response::new(503)).expect_err("server").retryable);
+        assert!(!judged(Response::new(404)).expect_err("missing").retryable);
+    }
 
     #[test]
     fn a_full_url_href_becomes_a_path() {

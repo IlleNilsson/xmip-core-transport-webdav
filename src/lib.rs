@@ -17,9 +17,11 @@
 //! the claim token, and its receive locks each member before it takes it,
 //! passing over what another node already holds.
 //!
-//! HTTP/1.1 with Content-Length, guarded where the scheme says so — TLS is
-//! `xmip-core-library-tls`'s, per ADR-0033, reached through the http technology's
-//! endpoint, which also reads the target.
+//! HTTP/1.1 with Content-Length, the connection kept between methods,
+//! written and read by the http technology's codec (`http::message`) —
+//! this crate carried its own until 2026-09-24 — and guarded where the
+//! scheme says so: TLS is `xmip-core-library-tls`'s, per ADR-0033, reached
+//! through the http technology's endpoint, which also reads the target.
 //!
 //! A send target is `webdav://host:port/path/name` or `http://…`, or a
 //! name alone inside this transport's collection. The origin URI is the
@@ -27,7 +29,6 @@
 
 pub mod client;
 pub mod session;
-pub mod wire;
 pub mod xml;
 
 use std::net::TcpListener;
@@ -37,6 +38,7 @@ pub use client::Client;
 use http::target::HttpTarget;
 pub use session::{Event, Session, Store};
 use transport::error::{Result, protocol_error};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Artefact, Claimed, Directions, ResourceClaim, Transport};
@@ -223,35 +225,20 @@ impl WebDavTransport {
     }
 }
 
-/// A bound listener waiting for its one client. `WebDAV` keeps its
-/// connection, so the session reads it until the PUT.
-struct Listening {
-    transport: WebDavTransport,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Listening {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        let mut session = self.transport.accept_one(&self.listener)?;
-        session
-            .next_put()?
-            .ok_or_else(|| protocol_error("the client closed without storing"))
-    }
-}
-
 impl Loopback for WebDavTransport {
+    /// A bound listener waiting for its one client. `WebDAV` keeps its
+    /// connection, so the session reads it until the PUT.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening {
-            transport: self.clone(),
-            listener,
-            address,
-        }))
+        let transport = self.clone();
+        Ok(Box::new(Listening::new(
+            move |listener: &TcpListener| {
+                transport
+                    .accept_one(listener)?
+                    .next_put()?
+                    .ok_or_else(|| protocol_error("the client closed without storing"))
+            },
+            self.bind()?,
+        )))
     }
 
     /// PUT the payload as one member of the root collection, from a fresh

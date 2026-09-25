@@ -18,10 +18,11 @@
 //! passing over what another node already holds.
 //!
 //! HTTP/1.1 with Content-Length, the connection kept between methods,
-//! written and read by the http technology's codec (`http::message`) —
-//! this crate carried its own until 2026-09-24 — and guarded where the
-//! scheme says so: TLS is `xmip-core-library-tls`'s, per ADR-0033, reached
-//! through the http technology's endpoint, which also reads the target.
+//! written and read by the estate's one HTTP/1.1 codec (`net::http`) —
+//! this crate carried its own until 2026-09-24 — the target read by
+//! `net::Endpoint`, and guarded where the scheme says so: TLS is
+//! `xmip-core-library-tls`'s, per ADR-0033, reached through the http
+//! technology's endpoint.
 //!
 //! A send target is `webdav://host:port/path/name` or `http://…`, or a
 //! name alone inside this transport's collection. The origin URI is the
@@ -35,7 +36,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use client::Client;
-use http::target::HttpTarget;
+use net::Endpoint;
 pub use session::{Event, Session, Store};
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
@@ -76,7 +77,7 @@ impl WebDavTransport {
     /// # Errors
     /// Where the collection URL cannot be read or the server not reached.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&HttpTarget::parse(&self.collection)?, self.timeout)
+        Client::connect(&Endpoint::parse(&self.collection)?, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -85,7 +86,7 @@ impl WebDavTransport {
     /// # Errors
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
-        socket::bind_tcp(HttpTarget::parse(&self.collection)?.authority)
+        socket::bind_tcp(&Endpoint::parse(&self.collection)?.address())
     }
 
     /// Accept one client on an already-bound listener.
@@ -112,9 +113,9 @@ impl WebDavTransport {
 
     /// Connect to wherever `url` points, and the path there.
     fn open(&self, url: &str) -> Result<(Client, String)> {
-        let target = HttpTarget::parse(url)?;
-        let client = Client::connect(&target, self.timeout)?;
-        Ok((client, target.path.to_string()))
+        let endpoint = Endpoint::parse(url)?;
+        let client = Client::connect(&endpoint, self.timeout)?;
+        Ok((client, endpoint.path().to_string()))
     }
 
     /// Lock, take and remove one member, or `None` where another node
@@ -374,7 +375,7 @@ mod tests {
             let (stream, _) = listener.accept().expect("accept");
             let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
             let mut writer = stream;
-            transport::wire::read_head(&mut reader).expect("the request head");
+            net::head::read_head(&mut reader).expect("the request head");
             std::io::Write::write_all(&mut writer, b"220 mail.example ESMTP\r\n\r\n")
                 .expect("write");
             // Read to the end rather than closing: a reset can discard bytes

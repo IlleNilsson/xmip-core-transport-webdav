@@ -16,7 +16,7 @@ use transport::error::Result;
 use transport::socket;
 
 use codec::xml::escape;
-use http::message::{self, Request, Response};
+use net::http::{Request, Response};
 
 /// What the session serves: collections of files, and the locks on them.
 ///
@@ -144,12 +144,12 @@ impl Session {
     /// Where the connection broke, nothing arrived before the timeout, or
     /// what arrived was not HTTP.
     pub fn next_event(&mut self) -> Result<Option<Event>> {
-        let Some(request) = message::read_request(&mut self.reader)? else {
+        let Some(request) = net::http::read_request(&mut self.reader)? else {
             return Ok(None);
         };
         let (event, response) = self.answer(&request);
         let response = response.header("Connection", "keep-alive");
-        message::write_response(&mut self.writer, &response)?;
+        net::http::write_response(&mut self.writer, &response)?;
         Ok(Some(event))
     }
 

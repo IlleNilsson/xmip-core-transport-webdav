@@ -42,7 +42,8 @@ use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Artefact, Claimed, Directions, ResourceClaim, Transport};
+use transport::{Arrived, Artefact, Claimed, Configured, Directions, ResourceClaim, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 pub use xml::Member;
 
 /// The one member the loopback pair puts into the root collection.
@@ -137,6 +138,31 @@ impl WebDavTransport {
                 Err(error)
             }
         }
+    }
+}
+
+impl Configured for WebDavTransport {
+    /// The address is the collection's URL, `webdav://host:port/orders`: the
+    /// collection a Receive Location takes from and a Send Location's names
+    /// resolve inside.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[Setting {
+            name: "timeout",
+            kind: Kind::Duration,
+            presence: Presence::Optional,
+            meaning: "How long a server that stops mid-answer is waited on; unbounded when \
+                      left out.",
+            applies: Applies::Both,
+        }],
+    };
+
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let transport = Self::new(address);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
     }
 }
 
@@ -257,6 +283,25 @@ impl Loopback for WebDavTransport {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use xcore::settings::Given;
+
+    #[test]
+    fn webdav_declares_its_settings_and_reads_through_them() {
+        assert_eq!(WebDavTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [("timeout".to_string(), Given::Text("30s".to_string()))];
+        let address = "webdav://dav.example:8080/orders";
+        let built =
+            <WebDavTransport as Configured>::open(address, Applies::Send, &given).expect("built");
+        assert_eq!(built.collection, "http://dav.example:8080/orders");
+        assert_eq!(built.timeout, Some(secs(30)));
+        let unknown = [("depth".to_string(), Given::Integer(1))];
+        let Err(refused) =
+            <WebDavTransport as Configured>::open(address, Applies::Receive, &unknown)
+        else {
+            panic!("depth is not a setting");
+        };
+        assert!(refused.message.contains("depth"), "{}", refused.message);
+    }
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)

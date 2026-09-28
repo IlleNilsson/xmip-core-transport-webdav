@@ -36,7 +36,8 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use client::Client;
-use net::Endpoint;
+use http::endpoint::Connections;
+use net::{Endpoint, Schemes, Target};
 pub use session::{Event, Session, Store};
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
@@ -53,6 +54,9 @@ const LOOPBACK_MEMBER: &str = "probe.bin";
 pub struct WebDavTransport {
     collection: String,
     timeout: Option<Duration>,
+    /// The connections every method goes on, a send's and a receive's
+    /// alike: opened once per server and kept.
+    connections: Connections,
 }
 
 impl WebDavTransport {
@@ -61,8 +65,9 @@ impl WebDavTransport {
     #[must_use]
     pub fn new(collection_url: impl Into<String>) -> Self {
         Self {
-            collection: as_http(&collection_url.into()),
+            collection: collection_url.into(),
             timeout: None,
+            connections: Connections::new(),
         }
     }
 
@@ -73,12 +78,17 @@ impl WebDavTransport {
         self
     }
 
-    /// Connect to the collection's server.
+    /// A client of the collection's server, on the connections kept for it.
     ///
     /// # Errors
-    /// Where the collection URL cannot be read or the server not reached.
+    /// Where the collection URL cannot be read.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&Endpoint::parse(&self.collection)?, self.timeout)
+        let endpoint = Endpoint::parse_under(&self.collection, &SCHEMES)?;
+        Ok(Client::over(
+            &endpoint,
+            self.timeout,
+            self.connections.clone(),
+        ))
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -87,7 +97,7 @@ impl WebDavTransport {
     /// # Errors
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
-        socket::bind_tcp(&Endpoint::parse(&self.collection)?.address())
+        socket::bind_tcp(&Endpoint::parse_under(&self.collection, &SCHEMES)?.address())
     }
 
     /// Accept one client on an already-bound listener.
@@ -101,8 +111,8 @@ impl WebDavTransport {
     /// `target` as a full URL: as it is when it carries a scheme, else a
     /// name inside this transport's collection.
     fn resolve(&self, target: &str) -> String {
-        if target.contains("://") {
-            as_http(target)
+        if Target::parse(target).is_ok() {
+            target.to_string()
         } else {
             format!(
                 "{}/{}",
@@ -112,10 +122,11 @@ impl WebDavTransport {
         }
     }
 
-    /// Connect to wherever `url` points, and the path there.
+    /// A client of wherever `url` points, on the connections kept for it,
+    /// and the path there.
     fn open(&self, url: &str) -> Result<(Client, String)> {
-        let endpoint = Endpoint::parse(url)?;
-        let client = Client::connect(&endpoint, self.timeout)?;
+        let endpoint = Endpoint::parse_under(url, &SCHEMES)?;
+        let client = Client::over(&endpoint, self.timeout, self.connections.clone());
         Ok((client, endpoint.path().to_string()))
     }
 
@@ -166,16 +177,12 @@ impl Configured for WebDavTransport {
     }
 }
 
-/// `webdav://` is `http://` on the wire, and `webdavs://` is `https://`.
-fn as_http(url: &str) -> String {
-    if let Some(rest) = url.strip_prefix("webdav://") {
-        format!("http://{rest}")
-    } else if let Some(rest) = url.strip_prefix("webdavs://") {
-        format!("https://{rest}")
-    } else {
-        url.to_string()
-    }
-}
+/// The schemes a collection is written in: `webdav://` is `http://` on
+/// the wire, and `webdavs://` is `https://`.
+const SCHEMES: Schemes = Schemes {
+    plain: &["http", "webdav"],
+    secure: &["https", "webdavs"],
+};
 
 impl Transport for WebDavTransport {
     fn name(&self) -> &'static str {
@@ -292,7 +299,11 @@ mod tests {
         let address = "webdav://dav.example:8080/orders";
         let built =
             <WebDavTransport as Configured>::open(address, Applies::Send, &given).expect("built");
-        assert_eq!(built.collection, "http://dav.example:8080/orders");
+        let collection = Endpoint::parse_under(&built.collection, &SCHEMES).expect("read");
+        assert_eq!(
+            (collection.secure(), collection.address()),
+            (false, "dav.example:8080".into())
+        );
         assert_eq!(built.timeout, Some(secs(30)));
         let unknown = [("depth".to_string(), Given::Integer(1))];
         let Err(refused) =
@@ -324,8 +335,9 @@ mod tests {
             assert!(near.send("orders/", b"x").is_err(), "a collection");
             let mut arrived = near.receive()?;
             arrived.sort_by(|a, b| a.origin_uri.cmp(&b.origin_uri));
-            Ok::<_, transport::TransportError>(arrived)
+            Ok::<_, transport::TransportError>((arrived, near.connections.opened()))
         });
+        // One server, so one connection for both puts and the receive.
         let mut session = far_end.accept_one(&listener).expect("accepting");
         let mut store = Store::default();
         store.files.insert("/orders".to_string(), BTreeMap::new());
@@ -333,20 +345,9 @@ mod tests {
         let first = session.next_put().expect("first").expect("one");
         assert_eq!(first.bytes, b"UNA:+.? '");
         assert!(first.origin_uri.ends_with("/orders/1.edi"));
-        assert!(session.next_put().expect("closed").is_none());
-        let mut session = far_end
-            .accept_one(&listener)
-            .expect("second")
-            .with_store(session.into_store());
         let second = session.next_put().expect("second").expect("one");
         assert!(second.bytes.is_empty());
-        assert!(session.next_put().expect("closed").is_none());
-        let store = session.into_store();
-        assert_eq!(store.files_in("/orders").expect("collection").len(), 2);
-        let mut session = far_end
-            .accept_one(&listener)
-            .expect("third")
-            .with_store(store);
+        assert_eq!(session.store().files_in("/orders").expect("c").len(), 2);
         let events = session.serve().expect("serving");
         assert_eq!(
             events
@@ -364,7 +365,8 @@ mod tests {
             !events.iter().any(|e| matches!(e, Event::Unlocked(_))),
             "the delete took each lock with it, RFC 4918: {events:?}"
         );
-        let arrived = sender.join().expect("thread").expect("round trip");
+        let (arrived, opened) = sender.join().expect("thread").expect("round trip");
+        assert_eq!(opened, 1);
         assert_eq!(arrived.len(), 2);
         assert_eq!(arrived[0].bytes, b"UNA:+.? '");
         assert!(arrived[0].origin_uri.starts_with("webdav://127.0.0.1:"));
@@ -394,22 +396,49 @@ mod tests {
             near.release(claimed)?;
             assert!(near.is_available(&artefact)?);
             assert!(!near.is_available(&Artefact::new("missing.edi"))?);
+            // Every method on one connection.
+            assert_eq!(near.connections.opened(), 1);
             Ok::<_, transport::TransportError>(())
         });
         let mut store = Store::default();
         store.insert("/orders", "1.edi", b"held");
-        for _ in 0..8 {
-            let mut session = far_end
-                .accept_one(&listener)
-                .expect("accepting")
-                .with_store(store);
-            session.serve().expect("serving");
-            store = session.into_store();
-        }
+        let mut session = far_end
+            .accept_one(&listener)
+            .expect("accepting")
+            .with_store(store);
+        session.serve().expect("serving");
+        let store = session.into_store();
         claimant.join().expect("thread").expect("claiming");
         assert!(store.locks.is_empty());
         assert!(far_end.claims().is_some());
         assert_eq!(far_end.name(), "webdav");
+    }
+
+    #[test]
+    fn a_thousand_receives_open_one_connection() {
+        const RECEIVES: usize = 1000;
+        let (far_end, listener, address) = far_end();
+        let receiver = std::thread::spawn(move || {
+            let near = WebDavTransport::new(format!("webdav://{address}/orders"))
+                .timing_out_after(secs(5));
+            let began = std::time::Instant::now();
+            for _ in 0..RECEIVES {
+                assert!(near.receive()?.is_empty());
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a listing.
+            assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
+            Ok::<_, transport::TransportError>(near.connections.opened())
+        });
+        let mut store = Store::default();
+        store.files.insert("/orders".to_string(), BTreeMap::new());
+        // One accept serves every listing.
+        let mut session = far_end
+            .accept_one(&listener)
+            .expect("accepting")
+            .with_store(store);
+        session.serve().expect("serving");
+        assert_eq!(receiver.join().expect("thread").expect("listed"), 1);
     }
 
     #[test]

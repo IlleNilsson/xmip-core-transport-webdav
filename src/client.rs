@@ -1,12 +1,13 @@
-//! The client's side: one connection to a `WebDAV` server, one method at a
-//! time, each a request answered before the next is written. The requests
-//! and answers are HTTP's, written and read by the estate's one HTTP/1.1
-//! codec (`net::http`), the connection kept alive between them.
+//! The client's side of a `WebDAV` server, one method at a time, each a
+//! request answered before the next is written. The requests and answers
+//! are HTTP's, on the connections the http technology keeps
+//! (`endpoint::Connections`): opened on the first request to the server and
+//! kept for every request after, by the transport and every client it
+//! hands them to.
 
-use std::io::BufReader;
 use std::time::Duration;
 
-use http::endpoint::{self, Connection};
+use http::endpoint::{Connections, Offer};
 use http::status;
 use net::Endpoint;
 use net::http::{Request, Response};
@@ -29,30 +30,29 @@ const LOCK: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
 <D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope>\
 <D:locktype><D:write/></D:locktype><D:owner>xmip</D:owner></D:lockinfo>";
 
-/// One connected client.
+/// A client of one server, on connections kept among others.
 pub struct Client {
-    // One connection, read through a buffer and written through the same
-    // object: a guarded connection cannot be split into two halves the way a
-    // socket can.
-    stream: BufReader<Box<dyn Connection>>,
+    endpoint: Endpoint,
+    timeout: Option<Duration>,
+    connections: Connections,
     authority: String,
 }
 
 impl Client {
-    /// Connect to the server `endpoint` names.
+    /// A client of the server `endpoint` names, its requests carried on
+    /// `connections`: nothing is connected until the first request.
     ///
     /// `webdavs://` and `https://` are guarded, through the same endpoint
     /// every technology riding on HTTP connects by, and so by the estate's
     /// one TLS (ADR-0033). Until 2026-09-23 this refused them.
-    ///
-    /// # Errors
-    /// Where the server could not be reached, or the target asks for TLS
-    /// this build has no `tls` feature for.
-    pub fn connect(endpoint: &Endpoint, timeout: Option<Duration>) -> Result<Self> {
-        Ok(Self {
-            stream: BufReader::new(endpoint::connect(endpoint, timeout)?),
+    #[must_use]
+    pub fn over(endpoint: &Endpoint, timeout: Option<Duration>, connections: Connections) -> Self {
+        Self {
+            endpoint: endpoint.clone(),
+            timeout,
+            connections,
             authority: endpoint.authority(),
-        })
+        }
     }
 
     /// The host and port this client is connected to.
@@ -64,14 +64,13 @@ impl Client {
     /// Send one request and read its response, whatever the status.
     ///
     /// # Errors
-    /// Where the connection broke or the answer was not HTTP.
+    /// Where the server could not be reached, the target asks for TLS this
+    /// build has no `tls` feature for, the connection broke, or the answer
+    /// was not HTTP.
     pub fn exchange(&mut self, request: &Request) -> Result<Response> {
-        let request = request
-            .clone()
-            .header("Host", &self.authority)
-            .header("Connection", "keep-alive");
-        net::http::write_request(self.stream.get_mut(), &request)?;
-        Ok(net::http::read_response(&mut self.stream)?)
+        let request = request.clone().header("Host", &self.authority);
+        self.connections
+            .exchange(&self.endpoint, self.timeout, Offer::Http11, &request)
     }
 
     /// One request that must succeed.
@@ -249,9 +248,9 @@ mod tests {
         // Nothing listens on port 1, so the connection fails where a TLS
         // build reaches: at the socket, not at a refusal of its own.
         let endpoint = Endpoint::parse("https://127.0.0.1:1/x").expect("parsed");
-        let error = Client::connect(&endpoint, None)
-            .err()
-            .expect("nothing there");
+        let error = Client::over(&endpoint, None, Connections::new())
+            .list("/x")
+            .expect_err("nothing there");
 
         assert!(
             !error.message.contains("speaks plain http"),

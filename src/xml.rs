@@ -1,13 +1,13 @@
 //! The little XML `WebDAV` carries, read for what Xmip needs from it: the
 //! members a multistatus lists, and the token a LOCK grants.
 //!
-//! Not an XML parser. Elements are found by local name whatever prefix the
-//! server chose — `D:`, `d:`, none — and entities are read as every XML
-//! reader in the estate reads them, by `xmip-core-library-codec`. A server that nests a `response` inside a
-//! `response` is handled; one that puts markup in a CDATA section is not,
-//! and no `WebDAV` server does.
+//! Read with the estate's flat scan (`codec::xml`): elements by local name
+//! whatever prefix the server chose — `D:`, `d:`, none — a `response`
+//! nested inside a `response` stepped over, entities read as every XML
+//! reader in the estate reads them. Markup in a CDATA section is not
+//! understood, and no `WebDAV` server puts it there.
 
-use codec::xml::unescape;
+use codec::xml::{content, elements};
 use transport::error::Result;
 
 /// What PROPFIND said about one member: its href, whether it is a
@@ -26,16 +26,15 @@ pub struct Member {
 /// An href holds an entity XML does not define.
 pub fn members(xml: &str) -> Result<Vec<Member>> {
     let mut members = Vec::new();
-    let mut from = 0;
-    while let Some((content, after)) = element(xml, from, "response") {
-        if let Some((href, _)) = element(content, 0, "href") {
+    for response in elements(xml, "response") {
+        let response = response.content();
+        if let Some(href) = content(response, "href") {
             members.push(Member {
-                href: unescape(href.trim())?,
-                collection: has(content, "collection"),
-                locked: has(content, "activelock"),
+                href: codec::xml::unescape(href.trim())?,
+                collection: has(response, "collection"),
+                locked: has(response, "activelock"),
             });
         }
-        from = after;
     }
     Ok(members)
 }
@@ -46,78 +45,15 @@ pub fn members(xml: &str) -> Result<Vec<Member>> {
 ///
 /// The token holds an entity XML does not define.
 pub fn lock_token(xml: &str) -> Result<Option<String>> {
-    let Some((content, _)) = element(xml, 0, "locktoken") else {
+    let Some(href) = content(xml, "locktoken").and_then(|token| content(token, "href")) else {
         return Ok(None);
     };
-    let Some((href, _)) = element(content, 0, "href") else {
-        return Ok(None);
-    };
-    Ok(Some(unescape(href.trim())?))
+    Ok(Some(codec::xml::unescape(href.trim())?))
 }
 
-/// One tag as it opens or closes: its local name, whether it closes, and
-/// whether it closes itself.
-fn tag(xml: &str, from: usize) -> Option<(usize, usize, &str, bool, bool)> {
-    let open = from + xml[from..].find('<')?;
-    let close = open + xml[open..].find('>')?;
-    let raw = &xml[open + 1..close];
-    let local = raw
-        .trim_start_matches('/')
-        .split([' ', '/'])
-        .next()
-        .unwrap_or("")
-        .rsplit(':')
-        .next()
-        .unwrap_or("");
-    Some((open, close, local, raw.starts_with('/'), raw.ends_with('/')))
-}
-
-/// The content of the first `name` element at or after `from`, whatever
-/// namespace prefix it carries, and the offset after its close tag.
-fn element<'a>(xml: &'a str, from: usize, name: &str) -> Option<(&'a str, usize)> {
-    let mut at = from;
-    loop {
-        let (_, close, local, closes, empty) = tag(xml, at)?;
-        if local == name && !closes && !empty {
-            let start = close + 1;
-            let end = start + closing(&xml[start..], name)?;
-            let after = end + xml[end..].find('>')? + 1;
-            return Some((&xml[start..end], after));
-        }
-        at = close + 1;
-    }
-}
-
-/// Where the close tag of `name` begins, nested same-named elements skipped.
-fn closing(rest: &str, name: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut at = 0;
-    loop {
-        let (open, close, local, closes, empty) = tag(rest, at)?;
-        if local == name {
-            if closes {
-                if depth == 0 {
-                    return Some(open);
-                }
-                depth -= 1;
-            } else if !empty {
-                depth += 1;
-            }
-        }
-        at = close + 1;
-    }
-}
-
-/// Whether a `name` element opens at all, `<D:collection/>` included.
+/// Whether a `name` element is there at all, `<D:collection/>` included.
 fn has(xml: &str, name: &str) -> bool {
-    let mut at = 0;
-    while let Some((_, close, local, closes, _)) = tag(xml, at) {
-        if local == name && !closes {
-            return true;
-        }
-        at = close + 1;
-    }
-    false
+    elements(xml, name).next().is_some()
 }
 
 #[cfg(test)]

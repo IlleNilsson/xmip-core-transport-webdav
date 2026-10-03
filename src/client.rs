@@ -162,14 +162,17 @@ impl Client {
         self.expect_ok(&Request::new("MKCOL", href)).map(|_| ())
     }
 
-    /// Take an exclusive write lock on `href`; the token that names it.
+    /// Take an exclusive write lock on `href`, asking the server to hold
+    /// it for `held` (its `Timeout` header, whole seconds and at least one,
+    /// RFC 4918 section 10.7; the server may grant less); the token that
+    /// names it.
     ///
     /// # Errors
     /// Where somebody else holds it — 423, retryable — or the server
     /// refused, or answered without a token.
-    pub fn lock(&mut self, href: &str) -> Result<String> {
+    pub fn lock(&mut self, href: &str, held: Duration) -> Result<String> {
         let request = Request::new("LOCK", href)
-            .header("Timeout", "Second-600")
+            .header("Timeout", &format!("Second-{}", held.as_secs().max(1)))
             .header("Content-Type", "application/xml")
             .body(LOCK);
         let response = self.expect_ok(&request)?;

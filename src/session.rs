@@ -11,7 +11,7 @@ use std::io::BufReader;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-use transport::Arrived;
+use transport::Taken;
 use transport::error::Result;
 use transport::socket;
 
@@ -51,7 +51,7 @@ pub enum Event {
     /// The client listed this collection.
     Listed(String),
     /// The client stored a file; here is the Stream.
-    Put(Arrived),
+    Put(Taken),
     /// The client fetched this href.
     Got(String),
     /// The client removed this href.
@@ -116,7 +116,7 @@ impl Session {
     ///
     /// # Errors
     /// Where the connection broke, or nothing arrived before the timeout.
-    pub fn next_put(&mut self) -> Result<Option<Arrived>> {
+    pub fn next_put(&mut self) -> Result<Option<Taken>> {
         loop {
             match self.next_event()? {
                 Some(Event::Put(arrived)) => return Ok(Some(arrived)),
@@ -175,7 +175,7 @@ impl Session {
                 self.store.insert(&collection, &name, &request.body);
                 let origin = format!("webdav://{}{href}", self.peer);
                 (
-                    Event::Put(Arrived::new(origin, request.body.clone())),
+                    Event::Put(Taken::new(origin, request.body.clone())),
                     Response::new(if existed { 204 } else { 201 }),
                 )
             }

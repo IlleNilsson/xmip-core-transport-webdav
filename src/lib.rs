@@ -29,6 +29,7 @@
 //! member's URL under this crate's scheme: `webdav://host:port/path/name`.
 
 pub mod client;
+mod locked;
 pub mod session;
 pub mod xml;
 
@@ -44,16 +45,25 @@ use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Artefact, Claimed, Configured, Directions, ResourceClaim, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
+
+use crate::locked::Locked;
 pub use xml::Member;
 
 /// The one member the loopback pair puts into the root collection.
 const LOOPBACK_MEMBER: &str = "probe.bin";
 
+/// How long a lock is asked to hold where `lock_timeout` is left out: ten
+/// minutes, longer than any receive cycle should take.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[derive(Clone)]
 pub struct WebDavTransport {
     collection: String,
     timeout: Option<Duration>,
+    /// How long a lock — a receive's claim on a member, or a claim's — is
+    /// asked to hold.
+    lock_timeout: Duration,
     /// The connections every method goes on, a send's and a receive's
     /// alike: opened once per server and kept.
     connections: Connections,
@@ -67,8 +77,16 @@ impl WebDavTransport {
         Self {
             collection: collection_url.into(),
             timeout: None,
+            lock_timeout: LOCK_TIMEOUT,
             connections: Connections::new(),
         }
+    }
+
+    /// Ask every lock taken to hold for `held`.
+    #[must_use]
+    pub const fn locking_for(mut self, held: Duration) -> Self {
+        self.lock_timeout = held;
+        self
     }
 
     /// Give up on a server that stops mid-answer.
@@ -129,27 +147,6 @@ impl WebDavTransport {
         let client = Client::over(&endpoint, self.timeout, self.connections.clone());
         Ok((client, endpoint.path().to_string()))
     }
-
-    /// Lock, take and remove one member, or `None` where another node
-    /// holds it. The delete takes the lock with it (RFC 4918 section 9.6),
-    /// so the lock is given back only where the take did not get that far.
-    fn take(client: &mut Client, href: &str) -> Result<Option<Vec<u8>>> {
-        let token = match client.lock(href) {
-            Ok(token) => token,
-            Err(error) if error.retryable => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let outcome = client
-            .get(href)
-            .and_then(|bytes| client.delete_held(href, &token).map(|()| bytes));
-        match outcome {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) => {
-                let _ = client.unlock(href, &token);
-                Err(error)
-            }
-        }
-    }
 }
 
 impl Configured for WebDavTransport {
@@ -158,18 +155,31 @@ impl Configured for WebDavTransport {
     /// resolve inside.
     const SETTINGS: &'static Settings = &Settings {
         technology: env!("CARGO_PKG_NAME"),
-        settings: &[Setting {
-            name: "timeout",
-            kind: Kind::Duration,
-            presence: Presence::Optional,
-            meaning: "How long a server that stops mid-answer is waited on; unbounded when \
-                      left out.",
-            applies: Applies::Both,
-        }],
+        settings: &[
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a server that stops mid-answer is waited on; unbounded \
+                          when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "lock_timeout",
+                kind: Kind::Duration,
+                presence: Presence::Default(Fixed::Duration(LOCK_TIMEOUT)),
+                meaning: "How long a lock is asked to hold (whole seconds; the server may \
+                          grant less): the one that claims a received member, or a claim's. A \
+                          member whose receive cycle never ends — its node stopped — is taken \
+                          again once it lapses, so it must outlast the longest cycle; 600s \
+                          when left out.",
+                applies: Applies::Both,
+            },
+        ],
     };
 
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        let transport = Self::new(address);
+        let transport = Self::new(address).locking_for(settings.duration("lock_timeout"));
         Ok(match settings.optional_duration("timeout") {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
@@ -193,20 +203,53 @@ impl Transport for WebDavTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("a receive lists and locks again what is not yet told")
+    }
+
     /// Every member of the collection that is a file and not held by
-    /// somebody else: locked, fetched and deleted, in that order.
+    /// somebody else, locked as it is listed — the lock is the claim —
+    /// and read by a GET when the runtime pulls its body; the lock is
+    /// asked to hold for `lock_timeout`. Nothing is deleted here: on
+    /// [`transport::Verdict::Accepted`] and [`transport::Verdict::Refused`]
+    /// the member is deleted with its lock token — a collection has no
+    /// place for a refused one — on [`transport::Verdict::Failed`] it is
+    /// unlocked and left for the next receive (`locked`).
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (mut client, path) = self.open(&self.collection)?;
-        let mut arrived = Vec::new();
+        let endpoint = Endpoint::parse_under(&self.collection, &SCHEMES)?;
+        let path = endpoint.path().to_string();
+        let mut client = Client::over(&endpoint, self.timeout, self.connections.clone());
+        let mut arrived: Vec<Arrived> = Vec::new();
         for member in client.list(&path)? {
             if member.collection || member.href.trim_end_matches('/') == path.trim_end_matches('/')
             {
                 continue;
             }
-            if let Some(bytes) = Self::take(&mut client, &member.href)? {
-                let origin = format!("webdav://{}{}", client.authority(), member.href);
-                arrived.push(Arrived::new(origin, bytes));
-            }
+            let token = match client.lock(&member.href, self.lock_timeout) {
+                Ok(token) => token,
+                // Another node holds it.
+                Err(error) if error.retryable => continue,
+                Err(error) => {
+                    // What was locked already is let go, not left locked.
+                    for taken in arrived {
+                        let _ = taken.failed();
+                    }
+                    return Err(error);
+                }
+            };
+            let origin = format!("webdav://{}{}", client.authority(), member.href);
+            let locked = Locked {
+                endpoint: endpoint.clone(),
+                timeout: self.timeout,
+                connections: self.connections.clone(),
+                href: member.href,
+                token,
+            };
+            arrived.push(Arrived::new(
+                origin,
+                locked.body(),
+                locked.acknowledgement(),
+            ));
         }
         Ok(arrived)
     }
@@ -239,7 +282,7 @@ impl ResourceClaim for WebDavTransport {
     /// LOCK it; the lock token is the claim token.
     fn claim(&self, artefact: &Artefact) -> Result<Claimed> {
         let (mut client, path) = self.open(&self.resolve(artefact.address()))?;
-        let token = client.lock(&path)?;
+        let token = client.lock(&path, self.lock_timeout)?;
         Ok(Claimed::new(artefact.clone(), token))
     }
 
@@ -305,6 +348,11 @@ mod tests {
             (false, "dav.example:8080".into())
         );
         assert_eq!(built.timeout, Some(secs(30)));
+        assert_eq!(built.lock_timeout, LOCK_TIMEOUT, "the default");
+        let given = [("lock_timeout".to_string(), Given::Text("90s".to_string()))];
+        let built = <WebDavTransport as Configured>::open(address, Applies::Receive, &given)
+            .expect("built");
+        assert_eq!(built.lock_timeout, secs(90));
         let unknown = [("depth".to_string(), Given::Integer(1))];
         let Err(refused) =
             <WebDavTransport as Configured>::open(address, Applies::Receive, &unknown)
@@ -335,7 +383,11 @@ mod tests {
             assert!(near.send("orders/", b"x").is_err(), "a collection");
             let mut arrived = near.receive()?;
             arrived.sort_by(|a, b| a.origin_uri.cmp(&b.origin_uri));
-            Ok::<_, transport::TransportError>((arrived, near.connections.opened()))
+            let taken = arrived
+                .into_iter()
+                .map(Arrived::taken)
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, transport::TransportError>((taken, near.connections.opened()))
         });
         // One server, so one connection for both puts and the receive.
         let mut session = far_end.accept_one(&listener).expect("accepting");
@@ -374,6 +426,75 @@ mod tests {
         assert!(arrived[1].origin_uri.ends_with("/orders/2.edi"));
         assert!(session.store().files_in("/orders").expect("c").is_empty());
         assert!(session.store().locks.is_empty(), "every lock given back");
+    }
+
+    #[test]
+    fn a_failed_member_is_unlocked_and_left_and_an_accepted_one_deleted() {
+        let (far_end, listener, address) = far_end();
+        let receiver = std::thread::spawn(move || {
+            let near = WebDavTransport::new(format!("webdav://{address}/orders"))
+                .timing_out_after(secs(2));
+            let mut arrived = near.receive()?;
+            assert_eq!(arrived.len(), 1);
+            let first = arrived.remove(0);
+            assert!(first.defers());
+            first.failed()?;
+            let mut again = near.receive()?;
+            assert_eq!(again.len(), 1, "left for the next receive");
+            let taken = again.remove(0).taken()?;
+            assert!(near.receive()?.is_empty(), "deleted");
+            Ok::<_, transport::TransportError>(taken)
+        });
+        let mut store = Store::default();
+        store.insert("/orders", "1.edi", b"once");
+        let mut session = far_end
+            .accept_one(&listener)
+            .expect("accepting")
+            .with_store(store);
+        let events = session.serve().expect("serving");
+        let taken = receiver.join().expect("thread").expect("received");
+        assert_eq!(taken.bytes, b"once");
+        assert!(taken.origin_uri.ends_with("/orders/1.edi"));
+        let unlocked = events
+            .iter()
+            .position(|e| matches!(e, Event::Unlocked(_)))
+            .expect("the failure unlocked it");
+        let deleted = events
+            .iter()
+            .position(|e| *e == Event::Deleted("/orders/1.edi".to_string()))
+            .expect("the acceptance deleted it");
+        assert!(unlocked < deleted, "{events:?}");
+        assert!(session.store().files_in("/orders").expect("c").is_empty());
+        assert!(session.store().locks.is_empty());
+    }
+
+    #[test]
+    fn a_refused_member_is_deleted_and_not_taken_again() {
+        let (far_end, listener, address) = far_end();
+        let receiver = std::thread::spawn(move || {
+            let near = WebDavTransport::new(format!("webdav://{address}/orders"))
+                .timing_out_after(secs(2))
+                .locking_for(secs(30));
+            let first = near.receive()?.remove(0);
+            first.refused(transport::Refusal::Unacceptable)?;
+            Ok::<_, transport::TransportError>(near.receive()?.len())
+        });
+        let mut store = Store::default();
+        store.insert("/orders", "1.edi", b"refused");
+        let mut session = far_end
+            .accept_one(&listener)
+            .expect("accepting")
+            .with_store(store);
+        let events = session.serve().expect("serving");
+        assert_eq!(receiver.join().expect("thread").expect("received"), 0);
+        assert!(
+            events
+                .iter()
+                .any(|e| *e == Event::Deleted("/orders/1.edi".to_string())),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, Event::Unlocked(_))));
+        assert!(session.store().files_in("/orders").expect("c").is_empty());
     }
 
     #[test]
@@ -472,7 +593,10 @@ mod tests {
         client.mkcol("/new").expect("created");
         assert!(client.mkcol("/new").is_err(), "twice");
         assert!(client.get("/new/none").is_err(), "not there");
-        assert!(client.lock("/new/none").is_err(), "nothing to lock");
+        assert!(
+            client.lock("/new/none", LOCK_TIMEOUT).is_err(),
+            "nothing to lock"
+        );
         client.put("/new/a.txt", b"a").expect("stored");
         let members = client.list("/new").expect("listed");
         assert_eq!(members.len(), 2);

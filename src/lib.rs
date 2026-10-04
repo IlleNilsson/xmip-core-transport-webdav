@@ -6,7 +6,8 @@
 //! `WebDAV` is the drop box that sits behind a web server: a collection is a
 //! directory, a member is a file, and every operation is an HTTP method —
 //! PROPFIND lists, GET reads, PUT writes, DELETE removes, MKCOL creates.
-//! A Receive Location lists the collection and takes each member; a Send
+//! A Receive Location lists the collection and takes each member — one it
+//! refused it leaves there, and does not take again while it is unchanged; a Send
 //! Location PUTs to a URL. Either may instead accept clients directly
 //! through [`Session`], one client's worth of server over a [`Store`].
 //!
@@ -44,7 +45,9 @@ use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Artefact, Claimed, Configured, Directions, ResourceClaim, Transport};
+use transport::{
+    Arrived, Artefact, Claimed, Configured, Directions, Refused, ResourceClaim, Transport,
+};
 use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
 
 use crate::locked::Locked;
@@ -67,6 +70,10 @@ pub struct WebDavTransport {
     /// The connections every method goes on, a send's and a receive's
     /// alike: opened once per server and kept.
     connections: Connections,
+    /// The members refused and left in the collection, by href, each with
+    /// its stamp; shared with the acknowledgements a receive handed out.
+    /// The node process's: a node started again takes them once more.
+    refused: Refused<String, String>,
 }
 
 impl WebDavTransport {
@@ -79,6 +86,7 @@ impl WebDavTransport {
             timeout: None,
             lock_timeout: LOCK_TIMEOUT,
             connections: Connections::new(),
+            refused: Refused::default(),
         }
     }
 
@@ -211,20 +219,29 @@ impl Transport for WebDavTransport {
     /// somebody else, locked as it is listed — the lock is the claim —
     /// and read by a GET when the runtime pulls its body; the lock is
     /// asked to hold for `lock_timeout`. Nothing is deleted here: on
-    /// [`transport::Verdict::Accepted`] and [`transport::Verdict::Refused`]
-    /// the member is deleted with its lock token — a collection has no
-    /// place for a refused one — on [`transport::Verdict::Failed`] it is
-    /// unlocked and left for the next receive (`locked`).
+    /// [`transport::Verdict::Accepted`] the member is deleted with its lock
+    /// token; on [`transport::Verdict::Refused`] it is unlocked and left,
+    /// and this Location does not take it again while its `getetag` (or
+    /// `getlastmodified` and `getcontentlength`) is unchanged; on
+    /// [`transport::Verdict::Failed`] it is unlocked and left for the next
+    /// receive (`locked`).
     fn receive(&self) -> Result<Vec<Arrived>> {
         let endpoint = Endpoint::parse_under(&self.collection, &SCHEMES)?;
         let path = endpoint.path().to_string();
         let mut client = Client::over(&endpoint, self.timeout, self.connections.clone());
+        let files: Vec<Member> = client
+            .list(&path)?
+            .into_iter()
+            .filter(|member| {
+                !member.collection
+                    && member.href.trim_end_matches('/') != path.trim_end_matches('/')
+            })
+            .collect();
+        let files = self
+            .refused
+            .sift(files, |member| &member.href, |member| member.stamp.clone());
         let mut arrived: Vec<Arrived> = Vec::new();
-        for member in client.list(&path)? {
-            if member.collection || member.href.trim_end_matches('/') == path.trim_end_matches('/')
-            {
-                continue;
-            }
+        for member in files {
             let token = match client.lock(&member.href, self.lock_timeout) {
                 Ok(token) => token,
                 // Another node holds it.
@@ -242,14 +259,18 @@ impl Transport for WebDavTransport {
                 endpoint: endpoint.clone(),
                 timeout: self.timeout,
                 connections: self.connections.clone(),
-                href: member.href,
+                href: member.href.clone(),
                 token,
             };
-            arrived.push(Arrived::new(
-                origin,
-                locked.body(),
-                locked.acknowledgement(),
-            ));
+            let body = locked.body();
+            // A member the server reports no stamp for cannot be told
+            // unchanged: refused, it is taken again.
+            let told = locked.acknowledgement();
+            let told = match member.stamp {
+                Some(stamp) => self.refused.remembering(member.href, stamp, told),
+                None => told,
+            };
+            arrived.push(Arrived::new(origin, body, told));
         }
         Ok(arrived)
     }
@@ -469,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_member_is_deleted_and_not_taken_again() {
+    fn a_refused_member_is_unlocked_and_left_and_not_taken_again_until_written_again() {
         let (far_end, listener, address) = far_end();
         let receiver = std::thread::spawn(move || {
             let near = WebDavTransport::new(format!("webdav://{address}/orders"))
@@ -477,7 +498,19 @@ mod tests {
                 .locking_for(secs(30));
             let first = near.receive()?.remove(0);
             first.refused(transport::Refusal::Unacceptable)?;
-            Ok::<_, transport::TransportError>(near.receive()?.len())
+            let unchanged = near.receive()?.len();
+            // A node started again remembers nothing: taken once more.
+            let restarted = WebDavTransport {
+                refused: Refused::default(),
+                ..near.clone()
+            };
+            let mut again = restarted.receive()?;
+            assert_eq!(again.len(), 1, "a restarted node takes it once more");
+            again.remove(0).refused(transport::Refusal::Unacceptable)?;
+            near.send("1.edi", b"written again")?;
+            let written = transport::arrived::one_arrival(near.receive()?, "written again")?;
+            let written = written.taken()?;
+            Ok::<_, transport::TransportError>((unchanged, written))
         });
         let mut store = Store::default();
         store.insert("/orders", "1.edi", b"refused");
@@ -486,15 +519,28 @@ mod tests {
             .expect("accepting")
             .with_store(store);
         let events = session.serve().expect("serving");
-        assert_eq!(receiver.join().expect("thread").expect("received"), 0);
-        assert!(
-            events
-                .iter()
-                .any(|e| *e == Event::Deleted("/orders/1.edi".to_string())),
-            "{events:?}"
+        let (unchanged, written) = receiver.join().expect("thread").expect("received");
+        assert_eq!(
+            unchanged, 0,
+            "the refused member is not taken again while unchanged"
         );
-        assert!(!events.iter().any(|e| matches!(e, Event::Unlocked(_))));
+        assert_eq!(
+            written.bytes, b"written again",
+            "another ETag: a new arrival"
+        );
+        let count = |wanted: fn(&Event) -> bool| events.iter().filter(|e| wanted(e)).count();
+        assert_eq!(
+            count(|e| matches!(e, Event::Unlocked(_))),
+            2,
+            "each refusal unlocked it and left it: {events:?}"
+        );
+        assert_eq!(
+            count(|e| matches!(e, Event::Deleted(_))),
+            1,
+            "only the acceptance deleted it: {events:?}"
+        );
         assert!(session.store().files_in("/orders").expect("c").is_empty());
+        assert!(session.store().locks.is_empty());
     }
 
     #[test]

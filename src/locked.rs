@@ -7,13 +7,13 @@
 //! member at a time, rather than every member read into memory as the
 //! receive lists them. On [`Verdict::Accepted`] the member is deleted with
 //! the lock token — the delete takes the lock with it (RFC 4918 section
-//! 9.6). On [`Verdict::Refused`] it is deleted the same way: a collection
-//! has no place for a refused member, the runtime audited the refusal,
-//! and the Stream is kept in Xmip from Message creation on (ADR-0013) —
-//! left, it would be taken and refused again on every receive. On
-//! [`Verdict::Failed`] it is unlocked and left where it is for the next
-//! receive. A member whose verdict never comes stays locked until the
-//! lock's timeout (the `lock_timeout` setting), then is taken again.
+//! 9.6). On [`Verdict::Refused`] it is unlocked and left where it lies: a
+//! refusal is not a consumption, and the member is the only copy. The
+//! receive remembers it with its stamp ([`transport::Refused`]), and does
+//! not take it again while it lies there unchanged. On [`Verdict::Failed`]
+//! it is unlocked and left where it is for the next receive. A member
+//! whose verdict never comes stays locked until the lock's timeout (the
+//! `lock_timeout` setting), then is taken again.
 
 use std::io::Read;
 
@@ -48,7 +48,7 @@ impl Locked {
         fetched(move || locked.client().get(&locked.href))
     }
 
-    /// Delete it on acceptance and on refusal, unlock it on failure.
+    /// Delete it on acceptance, unlock it on refusal and on failure.
     #[must_use]
     pub fn acknowledgement(self) -> Acknowledgement {
         Acknowledgement::deferred(move |verdict| self.told(verdict))
@@ -57,8 +57,8 @@ impl Locked {
     fn told(&self, verdict: Verdict) -> Result<()> {
         let mut client = self.client();
         match verdict {
-            Verdict::Accepted | Verdict::Refused(_) => client.delete_held(&self.href, &self.token),
-            Verdict::Failed => client.unlock(&self.href, &self.token),
+            Verdict::Accepted => client.delete_held(&self.href, &self.token),
+            Verdict::Refused(_) | Verdict::Failed => client.unlock(&self.href, &self.token),
         }
     }
 }

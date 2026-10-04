@@ -7,16 +7,20 @@
 //! reader in the estate reads them. Markup in a CDATA section is not
 //! understood, and no `WebDAV` server puts it there.
 
-use codec::xml::{content, elements};
+use codec::xml::{content, elements, text};
 use transport::error::Result;
 
 /// What PROPFIND said about one member: its href, whether it is a
-/// collection, and whether an active lock was reported on it.
+/// collection, whether an active lock was reported on it, and its stamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub href: String,
     pub collection: bool,
     pub locked: bool,
+    /// What changes whenever the member is written again: its `getetag`,
+    /// or else its `getlastmodified` with its `getcontentlength` (RFC 4918
+    /// section 15); `None` where the server reported neither.
+    pub stamp: Option<String>,
 }
 
 /// The members of a multistatus body, one per `<D:response>`.
@@ -33,10 +37,34 @@ pub fn members(xml: &str) -> Result<Vec<Member>> {
                 href: codec::xml::unescape(href.trim())?,
                 collection: has(response, "collection"),
                 locked: has(response, "activelock"),
+                stamp: stamp(response)?,
             });
         }
     }
     Ok(members)
+}
+
+/// A member's `getetag`, or else its `getlastmodified` and
+/// `getcontentlength` together, or `None` where it reported none of them.
+fn stamp(response: &str) -> Result<Option<String>> {
+    let read = |name| -> Result<Option<String>> {
+        Ok(text(response, name)?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()))
+    };
+    if let Some(tag) = read("getetag")? {
+        return Ok(Some(tag));
+    }
+    Ok(
+        match (read("getlastmodified")?, read("getcontentlength")?) {
+            (None, None) => None,
+            (modified, length) => Some(format!(
+                "{} {}",
+                modified.unwrap_or_default(),
+                length.unwrap_or_default()
+            )),
+        },
+    )
 }
 
 /// The lock token a LOCK response carries: `<D:locktoken><D:href>`.
@@ -67,8 +95,11 @@ mod tests {
               <D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
             <d:response><d:href>/orders/a&amp;b.edi</d:href><d:propstat><d:prop>
               <d:resourcetype/><d:lockdiscovery><d:activelock/></d:lockdiscovery>
+              <d:getetag>"7"</d:getetag><d:getcontentlength>3</d:getcontentlength>
               </d:prop></d:propstat></d:response>
             <response><href>/orders/2.edi</href><propstat><prop><resourcetype/>
+              <getlastmodified>Sun, 04 Oct 2026 08:00:00 GMT</getlastmodified>
+              <getcontentlength>12</getcontentlength>
               </prop></propstat></response></D:multistatus>"#;
         let members = super::members(xml).expect("read");
         assert_eq!(members.len(), 3);
@@ -78,6 +109,13 @@ mod tests {
         assert!(members[1].locked);
         assert!(!members[2].locked);
         assert_eq!(members[2].href, "/orders/2.edi");
+        assert_eq!(members[0].stamp, None);
+        assert_eq!(members[1].stamp.as_deref(), Some("\"7\""), "the ETag first");
+        assert_eq!(
+            members[2].stamp.as_deref(),
+            Some("Sun, 04 Oct 2026 08:00:00 GMT 12"),
+            "else when it was written, and how long it is"
+        );
         let lock = r#"<D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock>
             <D:locktoken><D:href>opaquelocktoken:7</D:href></D:locktoken>
             </D:activelock></D:lockdiscovery></D:prop>"#;

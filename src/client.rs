@@ -21,9 +21,11 @@ const SERVICE: &str = "the WebDAV server";
 /// the resource now and will let go.
 const LOCKED: &str = "Locked";
 
-/// The body PROPFIND asks with: what a member is, and who holds it.
+/// The body PROPFIND asks with: what a member is, who holds it, and what
+/// says it is unchanged.
 const PROPFIND: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/><D:lockdiscovery/></D:prop></D:propfind>";
+<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/><D:lockdiscovery/>\
+<D:getetag/><D:getlastmodified/><D:getcontentlength/></D:prop></D:propfind>";
 
 /// The body LOCK asks with: exclusive, for writing, owned by this node.
 const LOCK: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\
@@ -236,12 +238,14 @@ mod tests {
             href: "http://dav.example:8080/orders/1.edi".to_string(),
             collection: false,
             locked: false,
+            stamp: None,
         };
         assert_eq!(relative(member).href, "/orders/1.edi");
         let bare = Member {
             href: "https://dav.example".to_string(),
             collection: true,
             locked: false,
+            stamp: None,
         };
         assert_eq!(relative(bare).href, "/");
     }

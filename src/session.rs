@@ -3,10 +3,13 @@
 //!
 //! Not a server. One session serves one client over a [`Store`] kept in
 //! memory — collections of files, and the locks held on them — answering
-//! each method with the status a real server would. Users are not checked.
+//! each method with the status a real server would; PROPFIND lists each
+//! file with its `getetag`, another whenever it is written with other
+//! bytes, and its `getcontentlength`. Users are not checked.
 //! A Location talks to a real server through [`crate::Client`].
 
 use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hasher};
 use std::io::BufReader;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
@@ -235,18 +238,18 @@ impl Session {
     fn propfind(&self, href: &str, depth: &str) -> (Event, Response) {
         let mut entries = Vec::new();
         if let Some(files) = self.store.files.get(href) {
-            entries.push(self.entry(&format!("{href}/"), true));
+            entries.push(self.entry(&format!("{href}/"), None));
             if depth != "0" {
-                for name in files.keys() {
-                    entries.push(self.entry(&format!("{href}/{name}"), false));
+                for (name, bytes) in files {
+                    entries.push(self.entry(&format!("{href}/{name}"), Some(bytes)));
                 }
             }
         } else {
             let (collection, name) = href.rsplit_once('/').unwrap_or(("", ""));
-            if self.file(collection, name).is_none() {
+            let Some(bytes) = self.file(collection, name) else {
                 return (Event::Refused(href.to_string(), 404), Response::new(404));
-            }
-            entries.push(self.entry(href, false));
+            };
+            entries.push(self.entry(href, Some(&bytes)));
         }
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
@@ -261,11 +264,18 @@ impl Session {
         )
     }
 
-    fn entry(&self, href: &str, collection: bool) -> String {
-        let kind = if collection {
-            "<D:resourcetype><D:collection/></D:resourcetype>"
-        } else {
-            "<D:resourcetype/>"
+    /// One `response` of a multistatus: a collection where `file` is
+    /// `None`, else a file of those bytes with its `getetag` and
+    /// `getcontentlength`.
+    fn entry(&self, href: &str, file: Option<&[u8]>) -> String {
+        let kind = match file {
+            None => "<D:resourcetype><D:collection/></D:resourcetype>".to_string(),
+            Some(bytes) => format!(
+                "<D:resourcetype/><D:getetag>{}</D:getetag>\
+                 <D:getcontentlength>{}</D:getcontentlength>",
+                escape(&etag(bytes)),
+                bytes.len()
+            ),
         };
         let lock = self
             .store
@@ -303,6 +313,14 @@ impl Session {
                 .body(body.as_bytes()),
         )
     }
+}
+
+/// A strong entity tag for `bytes`: another whenever a file is written
+/// with other bytes (RFC 9110 section 8.8.3).
+fn etag(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(bytes);
+    format!("\"{}-{:016x}\"", bytes.len(), hasher.finish())
 }
 
 fn active_lock(token: &str) -> String {

@@ -41,6 +41,7 @@ pub use client::Client;
 use http::endpoint::Connections;
 use net::{Endpoint, Schemes, Target};
 pub use session::{Event, Session, Store};
+use transport::ArrivalIdentity;
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -270,7 +271,7 @@ impl Transport for WebDavTransport {
                 Some(stamp) => self.refused.remembering(member.href, stamp, told),
                 None => told,
             };
-            arrived.push(Arrived::new(origin, body, told));
+            arrived.push(Arrived::new(origin, body, told).detected());
         }
         Ok(arrived)
     }
@@ -324,6 +325,12 @@ impl WebDavTransport {
 }
 
 impl Loopback for WebDavTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "a file names no sender: the share it was taken from is in its origin",
+        )
+    }
+
     /// A bound listener waiting for its one client. `WebDAV` keeps its
     /// connection, so the session reads it until the PUT.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {

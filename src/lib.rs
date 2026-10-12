@@ -216,6 +216,10 @@ impl Transport for WebDavTransport {
         transport::Arrivals::Ordered("a receive lists and locks again what is not yet told")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Polled("a receive lists the collection and returns")
+    }
+
     /// Every member of the collection that is a file and not held by
     /// somebody else, locked as it is listed — the lock is the claim —
     /// and read by a GET when the runtime pulls its body; the lock is

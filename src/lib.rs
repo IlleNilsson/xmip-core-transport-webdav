@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(first.bytes, b"UNA:+.? '");
         assert!(first.origin_uri.ends_with("/orders/1.edi"));
         let second = session.next_put().expect("second").expect("one");
-        assert!(second.bytes.is_empty());
+        assert_eq!(second.bytes, [] as [u8; 0]);
         assert_eq!(session.store().files_in("/orders").expect("c").len(), 2);
         let events = session.serve().expect("serving");
         assert_eq!(

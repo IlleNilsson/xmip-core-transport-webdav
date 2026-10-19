@@ -230,7 +230,7 @@ impl Transport for WebDavTransport {
     /// `getlastmodified` and `getcontentlength`) is unchanged; on
     /// [`transport::Verdict::Failed`] it is unlocked and left for the next
     /// receive (`locked`).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let endpoint = Endpoint::parse_under(&self.collection, &SCHEMES)?;
         let path = endpoint.path().to_string();
         let mut client = Client::over(&endpoint, self.timeout, self.connections.clone());
@@ -247,6 +247,9 @@ impl Transport for WebDavTransport {
             .sift(files, |member| &member.href, |member| member.stamp.clone());
         let mut arrived: Vec<Arrived> = Vec::new();
         for member in files {
+            if arrived.len() >= most {
+                break;
+            }
             let token = match client.lock(&member.href, self.lock_timeout) {
                 Ok(token) => token,
                 // Another node holds it.
@@ -280,7 +283,14 @@ impl Transport for WebDavTransport {
         Ok(arrived)
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered(
+            "the HTTP client writes a request whole, its length counted from it",
+        )
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         let url = self.resolve(target);
         if url.ends_with('/') {
             return Err(protocol_error(format!(

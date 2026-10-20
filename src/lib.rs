@@ -47,7 +47,7 @@ use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{
-    Arrived, Artefact, Claimed, Configured, Directions, Refused, ResourceClaim, Transport,
+    Arrived, Artifact, Claimed, Configured, Directions, Refused, ResourceClaim, Transport,
 };
 use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
 
@@ -308,23 +308,23 @@ impl Transport for WebDavTransport {
 
 impl ResourceClaim for WebDavTransport {
     /// Whether the member is there and nobody reports a lock on it.
-    fn is_available(&self, artefact: &Artefact) -> Result<bool> {
-        let (mut client, path) = self.open(&self.resolve(artefact.address()))?;
+    fn is_available(&self, artifact: &Artifact) -> Result<bool> {
+        let (mut client, path) = self.open(&self.resolve(artifact.address()))?;
         Ok(client
             .find(&path)?
             .is_some_and(|member| !member.locked && !member.collection))
     }
 
     /// LOCK it; the lock token is the claim token.
-    fn claim(&self, artefact: &Artefact) -> Result<Claimed> {
-        let (mut client, path) = self.open(&self.resolve(artefact.address()))?;
+    fn claim(&self, artifact: &Artifact) -> Result<Claimed> {
+        let (mut client, path) = self.open(&self.resolve(artifact.address()))?;
         let token = client.lock(&path, self.lock_timeout)?;
-        Ok(Claimed::new(artefact.clone(), token))
+        Ok(Claimed::new(artifact.clone(), token))
     }
 
     /// UNLOCK it with the token the claim carried.
     fn release(&self, claimed: Claimed) -> Result<()> {
-        let (mut client, path) = self.open(&self.resolve(claimed.artefact.address()))?;
+        let (mut client, path) = self.open(&self.resolve(claimed.artifact.address()))?;
         client.unlock(&path, &claimed.token)
     }
 }
@@ -570,20 +570,20 @@ mod tests {
         let claimant = std::thread::spawn(move || {
             let near = WebDavTransport::new(format!("webdav://{address}/orders"))
                 .timing_out_after(secs(2));
-            let artefact = Artefact::new(format!("webdav://{address}/orders/1.edi"));
-            assert!(near.is_available(&artefact)?);
-            let claimed = near.claim(&artefact)?;
+            let artifact = Artifact::new(format!("webdav://{address}/orders/1.edi"));
+            assert!(near.is_available(&artifact)?);
+            let claimed = near.claim(&artifact)?;
             assert!(claimed.token.starts_with("opaquelocktoken:"));
-            let second = near.claim(&artefact).expect_err("held");
+            let second = near.claim(&artifact).expect_err("held");
             assert!(second.retryable, "somebody holds it now and will let go");
-            assert!(!near.is_available(&artefact)?);
+            assert!(!near.is_available(&artifact)?);
             let mut client = near.connect()?;
             assert!(client.delete("/orders/1.edi").is_err(), "locked");
             assert!(client.unlock("/orders/1.edi", "wrong").is_err());
             drop(client);
             near.release(claimed)?;
-            assert!(near.is_available(&artefact)?);
-            assert!(!near.is_available(&Artefact::new("missing.edi"))?);
+            assert!(near.is_available(&artifact)?);
+            assert!(!near.is_available(&Artifact::new("missing.edi"))?);
             // Every method on one connection.
             assert_eq!(near.connections.opened(), 1);
             Ok::<_, transport::TransportError>(())

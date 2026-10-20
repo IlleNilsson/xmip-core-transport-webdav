@@ -199,7 +199,7 @@ impl Client {
     }
 }
 
-/// `Ok` for a 2xx, else the failure with HTTP's judgement of it — and 423
+/// `Ok` for a 2xx, else the failure with HTTP's judgment of it — and 423
 /// Locked worth repeating too, which HTTP alone does not say.
 fn judged(response: Response) -> Result<Response> {
     status::judge(

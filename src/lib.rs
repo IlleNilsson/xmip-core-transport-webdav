@@ -187,6 +187,14 @@ impl Configured for WebDavTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["webdav", "webdavs"];
+
+    /// The whole address: its scheme says whether TLS guards the collection.
+    fn own_terms(address: &str) -> &str {
+        address
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let transport = Self::new(address).locking_for(settings.duration("lock_timeout"));
         Ok(match settings.optional_duration("timeout") {

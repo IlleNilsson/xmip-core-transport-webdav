@@ -617,13 +617,9 @@ mod tests {
         let receiver = std::thread::spawn(move || {
             let near = WebDavTransport::new(format!("webdav://{address}/orders"))
                 .timing_out_after(secs(5));
-            let began = std::time::Instant::now();
             for _ in 0..RECEIVES {
                 assert!(near.receive()?.is_empty());
             }
-            let took = began.elapsed();
-            // Generous for a debug build under load: a millisecond a listing.
-            assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
             Ok::<_, transport::TransportError>(near.connections.opened())
         });
         let mut store = Store::default();

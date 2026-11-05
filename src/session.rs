@@ -1,5 +1,5 @@
 //! The server's side of one connection: what a test puts at the far end,
-//! and what the playground stands up in place of a `WebDAV` server.
+//! and what the essentials stands up in place of a `WebDAV` server.
 //!
 //! Not a server. One session serves one client over a [`Store`] kept in
 //! memory — collections of files, and the locks held on them — answering

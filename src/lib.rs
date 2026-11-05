@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(pair.ceiling(), None);
     }
 
-    /// The Playground's edge payloads, written here so the crate does not
+    /// The Essentials' edge payloads, written here so the crate does not
     /// depend on it.
     fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
         vec![

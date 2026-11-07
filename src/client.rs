@@ -104,7 +104,7 @@ impl Client {
             return Ok(None);
         }
         let response = judged(response)?;
-        let text = String::from_utf8_lossy(&response.body).into_owned();
+        let text = String::from_utf8_lossy_owned(response.body);
         Ok(xml::members(&text)?.into_iter().next().map(relative))
     }
 
@@ -114,7 +114,7 @@ impl Client {
             .header("Content-Type", "application/xml")
             .body(PROPFIND);
         let response = self.expect_ok(&request)?;
-        let text = String::from_utf8_lossy(&response.body).into_owned();
+        let text = String::from_utf8_lossy_owned(response.body);
         Ok(xml::members(&text)?.into_iter().map(relative).collect())
     }
 
@@ -178,7 +178,7 @@ impl Client {
             .header("Content-Type", "application/xml")
             .body(LOCK);
         let response = self.expect_ok(&request)?;
-        let text = String::from_utf8_lossy(&response.body).into_owned();
+        let text = String::from_utf8_lossy(&response.body);
         xml::lock_token(&text)?
             .or_else(|| {
                 response

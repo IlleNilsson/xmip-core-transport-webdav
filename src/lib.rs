@@ -45,7 +45,6 @@ use transport::ArrivalIdentity;
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
 use transport::{
     Arrived, Artifact, Claimed, Configured, Directions, Refused, ResourceClaim, Transport,
 };
@@ -119,12 +118,15 @@ impl WebDavTransport {
     }
 
     /// Bind as the far end clients connect to, and report the address.
-    /// The collection URL's authority is the bind address here.
+    /// The collection URL's authority is the bind address here, in the
+    /// clear: `webdavs://` is refused as asking for TLS
+    /// (`http::server::listen`).
     ///
     /// # Errors
-    /// Where the address is taken, malformed, or not permitted.
+    /// Where the address asks for TLS, is taken, malformed, or not
+    /// permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
-        socket::bind_tcp(&Endpoint::parse_under(&self.collection, &SCHEMES)?.address())
+        http::server::listen(&self.collection, &SCHEMES)
     }
 
     /// Accept one client on an already-bound listener.

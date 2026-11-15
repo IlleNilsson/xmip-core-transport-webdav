@@ -52,5 +52,11 @@ name = "measured"
 path = "tests/measured/main.rs"
 test = false
 
+[dev-dependencies]
+# The timing program's figure, the fastest of five over its rounds beside a
+# plain wake, read once for the estate (`xcore::latency`); for the tests
+# only.
+xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main", features = ["test-support"] }
+
 [profile.dev.package."*"]
 opt-level = 3

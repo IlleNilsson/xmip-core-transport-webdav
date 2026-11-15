@@ -6,13 +6,20 @@
 //! (`cargo test --test measured --all-features -- --test-threads=1`), so
 //! what is measured is Xmip's work and not its neighbors':
 //!
-//! - a thousand listings on one connection take a millisecond each at most.
+//! - a thousand listings on one connection take a millisecond each at most
+//!   beyond their wakes, round by round beside a plain wake, the fastest of
+//!   five (`xcore::latency::Rounds`).
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use transport::Transport;
+use xcore::latency::Rounds;
 use xmip_core_transport_webdav::{Store, WebDavTransport};
+
+/// What a listing wakes where a plain wake wakes one: the far end at the
+/// PROPFIND, and this end at its answer.
+const WAKES: u32 = 2;
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -26,14 +33,11 @@ fn a_thousand_listings_take_a_millisecond_each_at_most() {
     let receiver = std::thread::spawn(move || {
         let near =
             WebDavTransport::new(format!("webdav://{address}/orders")).timing_out_after(secs(5));
-        let began = Instant::now();
+        let mut rounds = Rounds::crossing(WAKES);
         for _ in 0..RECEIVES {
-            assert!(near.receive()?.is_empty());
+            assert!(rounds.round(|| near.receive())?.is_empty());
         }
-        let took = began.elapsed();
-        // Generous for a debug build under load: a millisecond a listing.
-        assert!(took < Duration::from_millis(RECEIVES as u64), "{took:?}");
-        Ok::<_, transport::TransportError>(())
+        Ok::<_, transport::TransportError>(rounds)
     });
     let mut store = Store::default();
     store.files.insert("/orders".to_string(), BTreeMap::new());
@@ -42,5 +46,6 @@ fn a_thousand_listings_take_a_millisecond_each_at_most() {
         .expect("accepting")
         .with_store(store);
     session.serve().expect("serving");
-    receiver.join().expect("thread").expect("listed");
+    let rounds = receiver.join().expect("thread").expect("listed");
+    rounds.hold("a listing");
 }

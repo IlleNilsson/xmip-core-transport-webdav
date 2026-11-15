@@ -97,13 +97,6 @@ impl WebDavTransport {
         self
     }
 
-    /// Give up on a server that stops mid-answer.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// A client of the collection's server, on the connections kept for it.
     ///
     /// # Errors
@@ -167,14 +160,12 @@ impl Configured for WebDavTransport {
     const SETTINGS: &'static Settings = &Settings {
         technology: env!("CARGO_PKG_NAME"),
         settings: &[
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a server that stops mid-answer is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a server that stops mid-answer is waited on; unbounded \
+                 when left out.",
+            ),
             Setting {
                 name: "lock_timeout",
                 kind: Kind::Duration,
@@ -197,12 +188,12 @@ impl Configured for WebDavTransport {
         address
     }
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        let transport = Self::new(address).locking_for(settings.duration("lock_timeout"));
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(Self::new(address).locking_for(settings.duration("lock_timeout")))
     }
 }
 

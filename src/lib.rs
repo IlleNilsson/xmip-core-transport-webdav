@@ -195,6 +195,13 @@ impl Configured for WebDavTransport {
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         Ok(Self::new(address).locking_for(settings.duration("lock_timeout")))
     }
+
+    /// The connections its clients share, an HTTP/2 one's frames in a span
+    /// counted on `clock`, its node's (ADR-0068, amendment 2026-11-16).
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.connections = self.connections.timed_by(clock);
+        self
+    }
 }
 
 /// The schemes a collection is written in: `webdav://` is `http://` on

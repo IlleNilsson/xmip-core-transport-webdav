@@ -207,8 +207,7 @@ impl Session {
             "UNLOCK" => {
                 let presented = request
                     .header_value("Lock-Token")
-                    .map(|value| value.trim_matches(['<', '>']))
-                    .unwrap_or_default();
+                    .map_or_default(|value| value.trim_matches(['<', '>']));
                 match self.store.locks.get(&href) {
                     None => refused(409),
                     Some(held) if held != presented => refused(403),
@@ -281,8 +280,9 @@ impl Session {
             .store
             .locks
             .get(href.trim_end_matches('/'))
-            .map(|token| format!("<D:lockdiscovery>{}</D:lockdiscovery>", active_lock(token)))
-            .unwrap_or_default();
+            .map_or_default(|token| {
+                format!("<D:lockdiscovery>{}</D:lockdiscovery>", active_lock(token))
+            });
         format!(
             "<D:response><D:href>{}</D:href><D:propstat><D:prop>{kind}{lock}</D:prop>\
              <D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",

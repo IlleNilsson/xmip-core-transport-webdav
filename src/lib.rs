@@ -686,8 +686,8 @@ mod tests {
         assert_eq!(pair.ceiling(), None);
     }
 
-    /// The Essentials' edge payloads, written here so the crate does not
-    /// depend on it.
+    /// The System Tests' edge payloads, written here so the crate does not
+    /// depend on them.
     fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
         vec![
             ("empty", Vec::new()),

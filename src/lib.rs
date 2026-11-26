@@ -28,38 +28,58 @@
 //! A send target is `webdav://host:port/path/name` or `http://…`, or a
 //! name alone inside this transport's collection. The origin URI is the
 //! member's URL under this crate's scheme: `webdav://host:port/path/name`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 mod locked;
+#[cfg(feature = "default")]
 pub mod session;
+#[cfg(feature = "default")]
 pub mod xml;
 
-use std::net::TcpListener;
-use std::time::Duration;
+#[cfg(feature = "default")]
+use std::{net::TcpListener, time::Duration};
 
+#[cfg(feature = "default")]
 pub use client::Client;
+#[cfg(feature = "default")]
+use declaration::LOCK_TIMEOUT;
+#[cfg(feature = "default")]
 use http::endpoint::Connections;
+#[cfg(feature = "default")]
 use net::{Endpoint, Schemes, Target};
+#[cfg(feature = "default")]
 pub use session::{Event, Session, Store};
-use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
-use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::{
-    Arrived, Artifact, Claimed, Configured, Directions, Refused, ResourceClaim, Transport,
+    ArrivalIdentity, Arrived, Artifact, Claimed, Configured, Directions, Refused, ResourceClaim,
+    Transport, listening::Listening,
 };
-use xcore::settings::{Applies, Fixed, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 use crate::locked::Locked;
+#[cfg(feature = "default")]
 pub use xml::Member;
 
 /// The one member the loopback pair puts into the root collection.
+#[cfg(feature = "default")]
 const LOOPBACK_MEMBER: &str = "probe.bin";
 
-/// How long a lock is asked to hold where `lock_timeout` is left out: ten
-/// minutes, longer than any receive cycle should take.
-const LOCK_TIMEOUT: Duration = Duration::from_secs(600);
-
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct WebDavTransport {
     collection: String,
@@ -76,6 +96,7 @@ pub struct WebDavTransport {
     refused: Refused<String, String>,
 }
 
+#[cfg(feature = "default")]
 impl WebDavTransport {
     /// Speak to the collection at `collection_url` —
     /// `webdav://host:port/orders` or `http://host:port/orders`.
@@ -153,35 +174,10 @@ impl WebDavTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for WebDavTransport {
-    /// The address is the collection's URL, `webdav://host:port/orders`: the
-    /// collection a Receive Location takes from and a Send Location's names
-    /// resolve inside.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a server that stops mid-answer is waited on; unbounded \
-                 when left out.",
-            ),
-            Setting {
-                name: "lock_timeout",
-                kind: Kind::Duration,
-                presence: Presence::Default(Fixed::Duration(LOCK_TIMEOUT)),
-                meaning: "How long a lock is asked to hold (whole seconds; the server may \
-                          grant less): the one that claims a received member, or a claim's. A \
-                          member whose receive cycle never ends — its node stopped — is taken \
-                          again once it lapses, so it must outlast the longest cycle; 600s \
-                          when left out.",
-                applies: Applies::Both,
-            },
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["webdav", "webdavs"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The whole address: its scheme says whether TLS guards the collection.
     fn own_terms(address: &str) -> &str {
@@ -206,11 +202,13 @@ impl Configured for WebDavTransport {
 
 /// The schemes a collection is written in: `webdav://` is `http://` on
 /// the wire, and `webdavs://` is `https://`.
+#[cfg(feature = "default")]
 const SCHEMES: Schemes = Schemes {
     plain: &["http", "webdav"],
     secure: &["https", "webdavs"],
 };
 
+#[cfg(feature = "default")]
 impl Transport for WebDavTransport {
     fn name(&self) -> &'static str {
         "webdav"
@@ -314,6 +312,7 @@ impl Transport for WebDavTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl ResourceClaim for WebDavTransport {
     /// Whether the member is there and nobody reports a lock on it.
     fn is_available(&self, artifact: &Artifact) -> Result<bool> {
@@ -337,6 +336,7 @@ impl ResourceClaim for WebDavTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl WebDavTransport {
     /// Both ends on this machine: an ephemeral local port serving the root
     /// collection, the loopback timeout.
@@ -346,6 +346,7 @@ impl WebDavTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for WebDavTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -383,7 +384,7 @@ impl Loopback for WebDavTransport {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn webdav_declares_its_settings_and_reads_through_them() {

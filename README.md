@@ -12,6 +12,10 @@ A receive lists the collection and LOCKs each member it hands up — the lock is
 
 The lock — a receive's, and a claim's — is asked to hold for `lock_timeout` (a duration, 600 seconds when left out), written as the LOCK's `Timeout: Second-<n>` header (RFC 4918 section 10.7; the server may grant less). It must outlast the longest receive cycle: a lock that lapses mid-cycle lets another node take the member too. The requests are the ones a receive always made — LOCK, GET, DELETE — only later; a failure or a refusal adds one UNLOCK.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `timeout` and `lock_timeout`, and `SCHEMES`, `webdav` and `webdavs`; `lock_timeout`'s default, `declaration::LOCK_TIMEOUT`, is declared there too, and a transport locks for it from there. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code and every crate the code is built on — the http technology, and with it TLS — are behind the default feature, and `tls`, which is code, turns the default on with it. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check a WebDAV Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

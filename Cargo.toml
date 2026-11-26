@@ -15,16 +15,18 @@ path = "src/lib.rs"
 # (repository-model.md). The http technology is a sibling, used for what it
 # already is: HTTP's requests and answers on the wire, the endpoint and the
 # target. Standard library otherwise: WebDAV is HTTP methods and a little XML.
+# Its declaration takes the capability's `timeout`
+# (`transport::configured::timeout`).
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
 # The settings this technology declares (xcore::settings), read through
 # transport::Configured (ADR-0064, amendment 2026-09-26).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 # XML character data, escaped as every reader in the estate unescapes it.
-codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
-http = { package = "xmip-core-transport-http", git = "https://github.com/IlleNilsson/xmip-core-transport-http", branch = "main" }
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main", optional = true }
+http = { package = "xmip-core-transport-http", git = "https://github.com/IlleNilsson/xmip-core-transport-http", branch = "main", optional = true }
 # HTTP/1.1 on the wire (`net::http`) and the URL an endpoint is
 # (`net::Endpoint`): the one codec every technology riding on HTTP calls.
-net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -38,8 +40,18 @@ unwrap_used = "warn"
 expect_used = "allow"
 
 [features]
-# HTTPS, through http's: `webdavs://` and `https://` need it.
-tls = ["http/tls"]
+# The technology: its code, everything it is built on, and its declaration.
+# Without it the crate is its declaration alone (ADR-0064, amendments
+# 2026-10-22 and 2026-11-26).
+default = ["declaration", "dep:codec", "dep:http", "dep:net"]
+# The declaration alone: what a Location of this technology is configured
+# with, `declaration::SETTINGS` and `SCHEMES`, with the lock's default hold,
+# and none of the code — what the surfaces' library is to carry (open
+# problem 48).
+declaration = []
+# HTTPS, through http's: `webdavs://` and `https://` need it; the
+# technology's code, so the default with it.
+tls = ["default", "http/tls"]
 
 # The module's timing program (doc/governance/rust-style.md section 5c): a
 # plain cargo test leaves it out, and the landing runs it after every other

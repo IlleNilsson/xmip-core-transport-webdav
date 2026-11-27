@@ -40,14 +40,10 @@ unwrap_used = "warn"
 expect_used = "allow"
 
 [features]
-# The technology: its code, everything it is built on, and its declaration.
-# Without it the crate is its declaration alone (ADR-0064, amendments
-# 2026-10-22 and 2026-11-26).
+# The code and its declaration: the transport guide's "The declaration",
+# module/core/capability/transport/doc/adding-a-transport.md.
 default = ["declaration", "dep:codec", "dep:http", "dep:net"]
-# The declaration alone: what a Location of this technology is configured
-# with, `declaration::SETTINGS` and `SCHEMES`, with the lock's default hold,
-# and none of the code — what the surfaces' library is to carry (open
-# problem 48).
+# The declaration alone, with the lock's default hold.
 declaration = []
 # HTTPS, through http's: `webdavs://` and `https://` need it; the
 # technology's code, so the default with it.
